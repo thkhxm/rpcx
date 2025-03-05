@@ -11,7 +11,7 @@ require (
 	github.com/apache/thrift v0.21.0
 	github.com/edwingeng/doublejump v1.0.1
 	github.com/fatih/color v1.18.0
-	github.com/go-echarts/go-echarts/v2 v2.4.6
+	github.com/go-echarts/go-echarts/v2 v2.5.1
 	github.com/go-ping/ping v1.2.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-redis/redis_rate/v9 v9.1.2
