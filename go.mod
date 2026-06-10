@@ -2,9 +2,9 @@
 // 使下游（tgf 及业务方）可直接 require 本 fork，无需 go.mod replace。
 module github.com/thkhxm/rpcx/v2
 
-go 1.24.0
+go 1.26.0
 
-toolchain go1.24.7
+toolchain go1.26.4
 
 require (
 	github.com/ChimeraCoder/gojson v1.1.0
