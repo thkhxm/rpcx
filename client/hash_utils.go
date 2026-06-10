@@ -2,7 +2,8 @@ package client
 
 import (
 	"fmt"
-	"hash/fnv"
+
+	"github.com/thkhxm/rpcx/v2/share"
 )
 
 // Hash consistently chooses a hash bucket number in the range [0, numBuckets) for the given key. numBuckets must be >= 1.
@@ -23,10 +24,11 @@ func Hash(key uint64, buckets int32) int32 {
 }
 
 // HashString get a hash value of a string
+//
+// 实现已下沉到 share.HashString（解除 server→client 的反向依赖，
+// 修复 client 包测试的 import 环），这里保留同名导出函数兼容既有调用方。
 func HashString(s string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(s))
-	return h.Sum64()
+	return share.HashString(s)
 }
 
 // HashServiceAndArgs define a hash function

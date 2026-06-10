@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/thkhxm/rpcx/v2/client"
 	"io"
 	"net"
 	"net/http"
@@ -22,10 +21,10 @@ import (
 	"time"
 
 	"github.com/jamiealquiza/tachymeter"
+	"github.com/soheilhy/cmux"
 	"github.com/thkhxm/rpcx/v2/log"
 	"github.com/thkhxm/rpcx/v2/protocol"
 	"github.com/thkhxm/rpcx/v2/share"
-	"github.com/soheilhy/cmux"
 	"golang.org/x/net/websocket"
 )
 
@@ -40,6 +39,11 @@ const (
 	ReaderBuffsize = 1024
 	// WriterBuffsize is used for bufio writer.
 	WriterBuffsize = 1024
+
+	// defaultLogicSyncLockPoolSize 是 LogicSync 串行锁池的默认槽数。
+	// 按 __hash（通常是 userId）散列到槽位实现"同一用户串行、不同用户并行"，
+	// 槽数越大哈希冲突（两个无关用户互相阻塞）的概率越低。
+	defaultLogicSyncLockPoolSize = 5000
 
 	// // WriteChanSize is used for response.
 	// WriteChanSize = 1024 * 1024
@@ -92,12 +96,13 @@ type Server struct {
 	DisableHTTPGateway bool
 	// DisableJSONRPC 控制 JSON-RPC 2.0 入口，默认值为 true（关闭），
 	// 需要时通过 WithJSONRPC() 显式开启。
-	DisableJSONRPC bool
-	EnableProfile         bool // enable profile and statsview or not
-	AsyncWrite            bool // set true if your server only serves few clients
-	pool                  WorkerPool
-	logicSyncMethod       map[string]bool // servicepath.method: true/false
-	logicLockPool         []*sync.Mutex   // logic lock pool
+	DisableJSONRPC     bool
+	EnableProfile      bool // enable profile and statsview or not
+	AsyncWrite         bool // set true if your server only serves few clients
+	pool               WorkerPool
+	logicSyncMethod    map[string]bool // servicepath.method: true/false
+	logicLockPool      []*sync.Mutex   // logic lock pool
+	logicEmptyHashWarn sync.Once       // LogicSync 请求缺 __hash 时只告警一次，避免刷日志
 
 	serviceMapMu sync.RWMutex
 	serviceMap   map[string]*service
@@ -161,9 +166,9 @@ func NewServer(options ...OptionFn) *Server {
 		op(s)
 	}
 
-	// 如果你的服务端只服务少量的客户端，可以设置为true
+	// 注册了 LogicSync 方法但未显式指定锁池大小时，按默认大小初始化
 	if s.logicLockPool == nil && len(s.logicSyncMethod) > 0 {
-		s.logicLockPool = make([]*sync.Mutex, 5000)
+		s.logicLockPool = make([]*sync.Mutex, defaultLogicSyncLockPoolSize)
 		for i := 0; i < len(s.logicLockPool); i++ {
 			s.logicLockPool[i] = &sync.Mutex{}
 		}
@@ -704,6 +709,40 @@ func (s *Server) auth(ctx context.Context, req *protocol.Message) error {
 	return nil
 }
 
+// logicSyncLockOf 返回该 LogicSync 请求应使用的串行锁；返回 nil 表示跳过加锁。
+//
+// 正常路径按请求 meta 里的 __hash（share.ContextKeyHash，通常为 userId）
+// 选槽，实现"同一用户串行、不同用户并行"。__hash 为空时（登录前消息、
+// 未注入 hash 的网关流量等）直接 HashString("") 会让全部空 hash 请求命中
+// 同一把锁，声明为 LogicSync 的方法对全体在线用户退化成单锁全局串行
+// （隐形吞吐悬崖），因此这里回退为按连接散列：同一连接串行（与该连接的
+// 消息有序性语义一致），不同连接互不阻塞，并打一次 Warn 提醒调用方注入
+// __hash。锁池为空时返回 nil（防御 len==0 取模除零 panic）。
+func (s *Server) logicSyncLockOf(ctx *share.Context) *sync.Mutex {
+	if len(s.logicLockPool) == 0 {
+		return nil
+	}
+
+	key := ctx.GetReqMetaDataByKey(share.ContextKeyHash)
+	if key == "" {
+		s.logicEmptyHashWarn.Do(func() {
+			log.Warnf("rpcx: LogicSync request without %q metadata, fallback to per-connection serialization; "+
+				"caller should inject the hash (e.g. userId) to get per-user serialization", share.ContextKeyHash)
+		})
+		switch v := ctx.Value(RemoteConnContextKey).(type) {
+		case net.Conn:
+			if v != nil {
+				key = v.RemoteAddr().String()
+			}
+		case string:
+			// HTTP 网关路径（gateway.go）放进 context 的是 RemoteAddr 字符串
+			key = v
+		}
+	}
+
+	return s.logicLockPool[share.HashString(key)%uint64(len(s.logicLockPool))]
+}
+
 func (s *Server) handleRequest(ctx context.Context, req *protocol.Message) (res *protocol.Message, err error) {
 	serviceName := req.ServicePath
 	methodName := req.ServiceMethod
@@ -757,9 +796,10 @@ func (s *Server) handleRequest(ctx context.Context, req *protocol.Message) (res 
 	}
 	if s.logicSyncMethod[serviceName+"."+methodName] {
 		if ct, ok := ctx.(*share.Context); ok {
-			l := s.logicLockPool[client.HashString(ct.GetReqMetaDataByKey(share.ContextKeyHash))%uint64(len(s.logicLockPool))]
-			l.Lock()
-			defer l.Unlock()
+			if l := s.logicSyncLockOf(ct); l != nil {
+				l.Lock()
+				defer l.Unlock()
+			}
 		}
 	}
 

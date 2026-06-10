@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alitto/pond"
+	"github.com/thkhxm/rpcx/v2/log"
 )
 
 // OptionFn configures options of server.
@@ -49,8 +50,17 @@ func WithLogicSync(serviceMethod string) OptionFn {
 }
 
 // WithLogicSyncPoolSize sets logic sync pool size.
+//
+// size <= 0 属非法入参：旧实现会创建空锁池，handleRequest 里按
+// len(logicLockPool) 取模时直接除零 panic。现改为忽略本次设置并打 Warn，
+// 让 NewServer 按默认大小（defaultLogicSyncLockPoolSize）初始化。
 func WithLogicSyncPoolSize(size int) OptionFn {
 	return func(s *Server) {
+		if size <= 0 {
+			log.Warnf("rpcx: WithLogicSyncPoolSize ignored non-positive size %d, default size %d will be used",
+				size, defaultLogicSyncLockPoolSize)
+			return
+		}
 		s.logicLockPool = make([]*sync.Mutex, size)
 		for i := 0; i < size; i++ {
 			s.logicLockPool[i] = &sync.Mutex{}

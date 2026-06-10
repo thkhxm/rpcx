@@ -7,9 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/panjf2000/ants/v2"
 	"io"
-	"maps"
 	"net"
 	"net/url"
 	"strconv"
@@ -260,12 +258,12 @@ func (client *Client) Go(ctx context.Context, servicePath, serviceMethod string,
 	call := new(Call)
 	call.ServicePath = servicePath
 	call.ServiceMethod = serviceMethod
-	meta := ctx.Value(share.ReqMetaDataKey)
-	if meta != nil { // copy meta in context to meta in requests
-		call.Metadata = make(map[string]string)
-		// 这里在高并发的情况下,如果外部对meta进行了修改,会导致并发问题
-		maps.Copy(call.Metadata, meta.(map[string]string))
-	}
+	// copy meta in context to meta in requests
+	// 必须持 share.Context 的 tagsLock 拷贝：网关侧的长生命周期 context 会被
+	// 其他 goroutine 并发 SetReqMetaData，不持锁的 maps.Copy 迭代会触发
+	// runtime 'concurrent map iteration and map write' fatal（不可 recover）。
+	// 无 metadata 时返回 nil，保持 call.Metadata 为 nil 的原有语义。
+	call.Metadata = share.CopyReqMetaDataFromContext(ctx)
 
 	if !share.IsShareContext(ctx) {
 		ctx = share.NewContext(ctx)
@@ -373,15 +371,15 @@ func (client *Client) SendRaw(ctx context.Context, r *protocol.Message) (map[str
 	call.Raw = true
 	call.ServicePath = r.ServicePath
 	call.ServiceMethod = r.ServiceMethod
-	meta := ctx.Value(share.ReqMetaDataKey)
+	// 持锁拷贝 context 里的 meta（理由同 Go()：避免与并发 SetReqMetaData
+	// 形成 map 迭代/写入竞态），无 meta 时返回 nil
+	meta := share.CopyReqMetaDataFromContext(ctx)
 
 	rmeta := make(map[string]string)
 
 	// copy meta to rmeta
-	if meta != nil {
-		for k, v := range meta.(map[string]string) {
-			rmeta[k] = v
-		}
+	for k, v := range meta {
+		rmeta[k] = v
 	}
 	// copy r.Metadata to rmeta
 	if r.Metadata != nil {
@@ -631,16 +629,17 @@ func (client *Client) send(ctx context.Context, call *Call) {
 	}
 }
 
+// input 串行读取并处理连接上的全部响应/服务端推送。
+//
+// 历史教训（commit 6f9e598，v3 已回退）：曾把本循环改成 ants 池并发处理，
+// 引入两个问题——① 池 goroutine 内对外层 err 变量的写与主循环 `for err == nil`
+// 的读构成数据竞态；② 并发投递使同一连接上的服务端推送可乱序到达
+// ServerMessageChan，网关会把后端推送乱序转发给玩家，与 LogicSync
+// "同一玩家消息须有序处理"的设计目标自相矛盾。串行处理是有意为之，
+// 与上游 rpcx 行为保持一致，请勿再次并发化。
 func (client *Client) input() {
 	var err error
-	initSize := 102400
-	p, _ := ants.NewPool(initSize)
-	defer func() {
-		p.Release()
-		if r := recover(); r != nil {
-			log.Errorf("client.input panic: %v", r)
-		}
-	}()
+
 	for err == nil {
 		res := protocol.NewMessage()
 		if client.option.IdleTimeout != 0 {
@@ -651,83 +650,8 @@ func (client *Client) input() {
 		if err != nil {
 			break
 		}
-		p.Submit(func() {
-			if client.Plugins != nil {
-				_ = client.Plugins.DoClientAfterDecode(res)
-			}
 
-			seq := res.Seq()
-			var call *Call
-			isServerMessage := (res.MessageType() == protocol.Request && !res.IsHeartbeat() && res.IsOneway())
-			if !isServerMessage {
-				client.mutex.Lock()
-				call = client.pending[seq]
-				delete(client.pending, seq)
-				client.mutex.Unlock()
-			}
-
-			if share.Trace {
-				log.Debugf("client.input received %v", res)
-			}
-
-			switch {
-			case call == nil:
-				if isServerMessage {
-					if client.ServerMessageChan != nil {
-						client.handleServerRequest(res)
-					}
-					return
-				}
-			case res.MessageStatusType() == protocol.Error:
-				// We've got an error response. Give this to the request
-				if len(res.Metadata) > 0 {
-					call.ResMetadata = res.Metadata
-
-					// convert server error to a customized error, which implements ServerError interface
-					if ClientErrorFunc != nil {
-						call.Error = ClientErrorFunc(res, res.Metadata[protocol.ServiceError])
-					} else {
-						call.Error = strErr(res.Metadata[protocol.ServiceError])
-					}
-
-				}
-
-				if call.Raw {
-					call.Metadata, call.Reply, _ = convertRes2Raw(res)
-					call.Metadata[XErrorMessage] = call.Error.Error()
-				} else if len(res.Payload) > 0 {
-					data := res.Payload
-					codec := share.Codecs[res.SerializeType()]
-					if codec != nil {
-						_ = codec.Decode(data, call.Reply)
-					}
-				}
-				call.done()
-			default:
-				if call.Raw {
-					call.Metadata, call.Reply, _ = convertRes2Raw(res)
-				} else {
-					data := res.Payload
-					if len(data) > 0 {
-						codec := share.Codecs[res.SerializeType()]
-						if codec == nil {
-							call.Error = strErr(ErrUnsupportedCodec.Error())
-						} else {
-							err = codec.Decode(data, call.Reply)
-							if err != nil {
-								call.Error = strErr(err.Error())
-							}
-						}
-					}
-					if len(res.Metadata) > 0 {
-						call.ResMetadata = res.Metadata
-					}
-
-				}
-				call.done()
-			}
-		})
-
+		err = client.handleResponse(res)
 	}
 	// Terminate pending calls.
 
@@ -780,6 +704,97 @@ func (client *Client) input() {
 	if err != nil && !closing {
 		log.Errorf("rpcx: client protocol error: %v", err)
 	}
+}
+
+// handleResponse 处理一条已解码的响应或服务端推送。
+// 返回非 nil error 时 input 主循环退出并走统一的连接终止路径
+// （terminate pending calls + 关闭连接）。处理过程中的 panic 也转换为
+// error 走同一路径，而不是吞掉后让连接带病继续运行。
+func (client *Client) handleResponse(res *protocol.Message) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("rpcx: client handleResponse panic: %v", r)
+		}
+	}()
+
+	if client.Plugins != nil {
+		_ = client.Plugins.DoClientAfterDecode(res)
+	}
+
+	seq := res.Seq()
+	var call *Call
+	isServerMessage := res.MessageType() == protocol.Request && !res.IsHeartbeat() && res.IsOneway()
+	if !isServerMessage {
+		client.mutex.Lock()
+		call = client.pending[seq]
+		delete(client.pending, seq)
+		client.mutex.Unlock()
+	}
+
+	if share.Trace {
+		log.Debugf("client.input received %v", res)
+	}
+
+	switch {
+	case call == nil:
+		if isServerMessage {
+			if client.ServerMessageChan != nil {
+				client.handleServerRequest(res)
+			}
+			return nil
+		}
+	case res.MessageStatusType() == protocol.Error:
+		// We've got an error response. Give this to the request
+		if len(res.Metadata) > 0 {
+			call.ResMetadata = res.Metadata
+
+			// convert server error to a customized error, which implements ServerError interface
+			if ClientErrorFunc != nil {
+				call.Error = ClientErrorFunc(res, res.Metadata[protocol.ServiceError])
+			} else {
+				call.Error = strErr(res.Metadata[protocol.ServiceError])
+			}
+
+		}
+
+		if call.Raw {
+			call.Metadata, call.Reply, _ = convertRes2Raw(res)
+			call.Metadata[XErrorMessage] = call.Error.Error()
+		} else if len(res.Payload) > 0 {
+			data := res.Payload
+			codec := share.Codecs[res.SerializeType()]
+			if codec != nil {
+				_ = codec.Decode(data, call.Reply)
+			}
+		}
+		call.done()
+	default:
+		if call.Raw {
+			call.Metadata, call.Reply, _ = convertRes2Raw(res)
+		} else {
+			data := res.Payload
+			if len(data) > 0 {
+				codec := share.Codecs[res.SerializeType()]
+				if codec == nil {
+					call.Error = strErr(ErrUnsupportedCodec.Error())
+				} else {
+					// 与上游一致：reply 解码失败视为协议级错误，
+					// 终止本连接的读循环（err 上抛给 input）
+					err = codec.Decode(data, call.Reply)
+					if err != nil {
+						call.Error = strErr(err.Error())
+					}
+				}
+			}
+			if len(res.Metadata) > 0 {
+				call.ResMetadata = res.Metadata
+			}
+
+		}
+		call.done()
+	}
+
+	return err
 }
 
 func (client *Client) handleServerRequest(msg *protocol.Message) {

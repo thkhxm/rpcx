@@ -3,8 +3,9 @@ package share
 import (
 	"context"
 	"fmt"
-	"golang.org/x/exp/maps"
+	"maps"
 	"reflect"
+	"slices"
 	"sync"
 )
 
@@ -96,8 +97,53 @@ func (c *Context) GetAllReqMetaDataKeys() (keys []string) {
 	c.tagsLock.Lock()
 	defer c.tagsLock.Unlock()
 	tmpMaps := c.getReqMetaData()
-	keys = maps.Keys(tmpMaps)
+	keys = slices.Collect(maps.Keys(tmpMaps))
 	return
+}
+
+// CopyReqMetaData 在持有 tagsLock 的情况下对请求 metadata 做一次深拷贝快照。
+//
+// 背景：网关侧存在长生命周期的 share.Context（每用户一个），其 metadata map
+// 会被其他 goroutine 通过 SetReqMetaData 并发写入；client 发请求前如果对
+// 同一 map 做不持锁的迭代拷贝（旧实现 client.Go 里的 maps.Copy），会触发
+// Go runtime 级 'concurrent map iteration and map write' fatal——不可 recover，
+// 整个进程直接崩溃。所有"读取整个 meta map"的场景都必须走本方法。
+// 无 metadata 时返回 nil。
+func (c *Context) CopyReqMetaData() map[string]string {
+	c.tagsLock.Lock()
+	defer c.tagsLock.Unlock()
+	meta := c.getReqMetaData()
+	if meta == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(meta))
+	maps.Copy(cp, meta)
+	return cp
+}
+
+// CopyReqMetaDataFromContext 是 CopyReqMetaData 的 context.Context 通用版。
+//
+// ctx 可能不是 *share.Context 本体，而是它被 context.WithCancel/WithTimeout
+// 等包装后的派生 context（例如 xclient 的 Failbackup 路径）。这种情况下类型
+// 断言拿不到 *share.Context，但 NewContext 已把 tagsLock 以 ContextTagsLock
+// 为键挂进了 context 链，这里通过 Value 把锁找回来再拷贝，保证同一把锁
+// 保护同一张 map。完全没有锁可寻时退化为普通拷贝（纯 context 场景，
+// map 由调用方独占，维持上游原语义）。
+func CopyReqMetaDataFromContext(ctx context.Context) map[string]string {
+	if sc, ok := ctx.(*Context); ok {
+		return sc.CopyReqMetaData()
+	}
+	meta, _ := ctx.Value(ReqMetaDataKey).(map[string]string)
+	if meta == nil {
+		return nil
+	}
+	if lk, _ := ctx.Value(ContextTagsLock).(*sync.Mutex); lk != nil {
+		lk.Lock()
+		defer lk.Unlock()
+	}
+	cp := make(map[string]string, len(meta))
+	maps.Copy(cp, meta)
+	return cp
 }
 
 func (c *Context) SetReqMetaData(key, val string) {

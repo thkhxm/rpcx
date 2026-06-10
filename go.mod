@@ -31,7 +31,6 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/kavu/go_reuseport v1.5.0
 	github.com/kr/pretty v0.3.1
-	github.com/panjf2000/ants/v2 v2.12.0
 	github.com/quic-go/quic-go v0.48.2
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475
 	github.com/rpcxio/libkv v0.5.1
@@ -45,7 +44,7 @@ require (
 	github.com/valyala/fastrand v1.1.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xtaci/kcp-go v5.4.20+incompatible
-	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
+	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
 	golang.org/x/net v0.50.0
 	golang.org/x/sync v0.19.0
 	google.golang.org/protobuf v1.36.11

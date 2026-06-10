@@ -496,15 +496,36 @@ func splitNetworkAndAddress(server string) (string, string) {
 
 func setServerTimeout(ctx context.Context) context.Context {
 	if deadline, ok := ctx.Deadline(); ok {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.ServerTimeout] = fmt.Sprintf("%d", time.Until(deadline).Milliseconds())
+		ctx = setReqMetadata(ctx, share.ServerTimeout, fmt.Sprintf("%d", time.Until(deadline).Milliseconds()))
 	}
 
+	return ctx
+}
+
+// setReqMetadata 把一对 kv 写进请求 metadata。
+//
+// ctx 是 *share.Context 时必须走其持锁封装 SetReqMetaData：网关侧的长生命
+// 周期 context 的 meta map 会被多个 goroutine 并发读写（与 client.Go 的持锁
+// 拷贝配对，共同消除 metadata map 竞态家族——不持锁的裸 map 写可触发
+// runtime 'concurrent map writes' fatal）。被 WithCancel/WithTimeout 包装过的
+// share.Context 通过链上的 ContextTagsLock 找回同一把锁。纯 context 场景
+// 维持上游原语义（map 由调用方独占）。
+func setReqMetadata(ctx context.Context, key, val string) context.Context {
+	if sc, ok := ctx.(*share.Context); ok {
+		sc.SetReqMetaData(key, val)
+		return ctx
+	}
+
+	metadata := ctx.Value(share.ReqMetaDataKey)
+	if metadata == nil {
+		metadata = map[string]string{}
+		ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
+	}
+	if lk, _ := ctx.Value(share.ContextTagsLock).(*sync.Mutex); lk != nil {
+		lk.Lock()
+		defer lk.Unlock()
+	}
+	metadata.(map[string]string)[key] = val
 	return ctx
 }
 
@@ -516,13 +537,8 @@ func (c *xClient) Go(ctx context.Context, serviceMethod string, args interface{}
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	ctx = setServerTimeout(ctx)
@@ -553,13 +569,8 @@ func (c *xClient) Call(ctx context.Context, serviceMethod string, args interface
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 	ctx = setServerTimeout(ctx)
 
@@ -714,13 +725,8 @@ func (c *xClient) Oneshot(ctx context.Context, serviceMethod string, args interf
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	ctx = setServerTimeout(ctx)
@@ -775,13 +781,8 @@ func (c *xClient) SendRaw(ctx context.Context, r *protocol.Message) (map[string]
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	ctx = setServerTimeout(ctx)
@@ -933,13 +934,8 @@ func (c *xClient) Broadcast(ctx context.Context, serviceMethod string, args inte
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	var replyOnce sync.Once
@@ -1026,13 +1022,8 @@ func (c *xClient) Fork(ctx context.Context, serviceMethod string, args interface
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	ctx = setServerTimeout(ctx)
@@ -1123,13 +1114,8 @@ func (c *xClient) Inform(ctx context.Context, serviceMethod string, args interfa
 	}
 
 	if c.auth != "" {
-		metadata := ctx.Value(share.ReqMetaDataKey)
-		if metadata == nil {
-			metadata = map[string]string{}
-			ctx = context.WithValue(ctx, share.ReqMetaDataKey, metadata)
-		}
-		m := metadata.(map[string]string)
-		m[share.AuthKey] = c.auth
+		// 持锁写 metadata，见 setReqMetadata 注释
+		ctx = setReqMetadata(ctx, share.AuthKey, c.auth)
 	}
 
 	ctx = setServerTimeout(ctx)
