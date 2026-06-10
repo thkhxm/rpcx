@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/thkhxm/rpcx/client"
+	"github.com/thkhxm/rpcx/v2/client"
 	"io"
 	"net"
 	"net/http"
@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/jamiealquiza/tachymeter"
-	"github.com/thkhxm/rpcx/log"
-	"github.com/thkhxm/rpcx/protocol"
-	"github.com/thkhxm/rpcx/share"
+	"github.com/thkhxm/rpcx/v2/log"
+	"github.com/thkhxm/rpcx/v2/protocol"
+	"github.com/thkhxm/rpcx/v2/share"
 	"github.com/soheilhy/cmux"
 	"golang.org/x/net/websocket"
 )

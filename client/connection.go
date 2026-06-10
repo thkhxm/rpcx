@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thkhxm/rpcx/log"
-	"github.com/thkhxm/rpcx/share"
+	"github.com/thkhxm/rpcx/v2/log"
+	"github.com/thkhxm/rpcx/v2/share"
 	"golang.org/x/net/websocket"
 )
 

@@ -3,7 +3,7 @@ package codec
 import (
 	"testing"
 
-	"github.com/thkhxm/rpcx/codec/testdata"
+	"github.com/thkhxm/rpcx/v2/codec/testdata"
 )
 
 type ColorGroup struct {

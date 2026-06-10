@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/thkhxm/rpcx/protocol"
+	"github.com/thkhxm/rpcx/v2/protocol"
 )
 
 // XClientPool is a xclient pool with fixed size.

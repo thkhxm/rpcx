@@ -10,8 +10,8 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/thkhxm/rpcx/log"
-	"github.com/thkhxm/rpcx/share"
+	"github.com/thkhxm/rpcx/v2/log"
+	"github.com/thkhxm/rpcx/v2/share"
 )
 
 var ErrNotAccept = errors.New("server refused the connection")

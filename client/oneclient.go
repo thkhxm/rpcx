@@ -7,10 +7,10 @@ import (
 	"net"
 	"sync"
 
-	"github.com/thkhxm/rpcx/share"
+	"github.com/thkhxm/rpcx/v2/share"
 
 	multierror "github.com/hashicorp/go-multierror"
-	"github.com/thkhxm/rpcx/protocol"
+	"github.com/thkhxm/rpcx/v2/protocol"
 )
 
 // OneClient wraps servicesPath and XClients.

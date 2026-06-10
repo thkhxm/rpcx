@@ -7,8 +7,8 @@ import (
 
 	"github.com/rcrowley/go-metrics"
 	"github.com/rcrowley/go-metrics/exp"
-	"github.com/thkhxm/rpcx/protocol"
-	"github.com/thkhxm/rpcx/server"
+	"github.com/thkhxm/rpcx/v2/protocol"
+	"github.com/thkhxm/rpcx/v2/server"
 )
 
 // MetricsPlugin has an issue. It changes seq of requests and it is wrong!!!!

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/thkhxm/rpcx/protocol"
-	"github.com/thkhxm/rpcx/share"
+	"github.com/thkhxm/rpcx/v2/protocol"
+	"github.com/thkhxm/rpcx/v2/share"
 )
 
 // Context represents a rpcx FastCall context.

@@ -3,7 +3,7 @@ package client
 import (
 	"sync/atomic"
 
-	"github.com/thkhxm/rpcx/protocol"
+	"github.com/thkhxm/rpcx/v2/protocol"
 )
 
 // OneClientPool is a oneclient pool with fixed size.

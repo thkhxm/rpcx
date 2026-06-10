@@ -1,8 +1,8 @@
 package share
 
 import (
-	"github.com/thkhxm/rpcx/codec"
-	"github.com/thkhxm/rpcx/protocol"
+	"github.com/thkhxm/rpcx/v2/codec"
+	"github.com/thkhxm/rpcx/v2/protocol"
 )
 
 const (
