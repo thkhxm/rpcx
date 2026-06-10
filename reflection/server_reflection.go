@@ -13,7 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ChimeraCoder/gojson"
-	"github.com/smallnest/rpcx/log"
+	"github.com/thkhxm/rpcx/log"
 )
 
 var (

@@ -1,9 +1,9 @@
-module github.com/smallnest/rpcx
+// fork 自 github.com/smallnest/rpcx，自 v3 起迁移为自有 module path，
+// 使下游（tgf 及业务方）可直接 require 本 fork，无需 go.mod replace。
+module github.com/thkhxm/rpcx
 
 go 1.23.4
-replace (
-	github.com/alitto/pond => 	github.com/alitto/pond v1.8.3
-)
+
 require (
 	github.com/ChimeraCoder/gojson v1.1.0
 	github.com/akutz/memconn v0.1.0
@@ -11,7 +11,10 @@ require (
 	github.com/apache/thrift v0.21.0
 	github.com/edwingeng/doublejump v1.0.1
 	github.com/fatih/color v1.18.0
-	github.com/go-echarts/go-echarts/v2 v2.4.6
+	// go-echarts 钉在 v2.3.3：statsview v1.0.1 与 v2.4.x 不兼容
+	// （v2.4.x 把 opts 的 bool 字段改为 types.Bool，statsview 编译失败）。
+	// 用 require 降版而非 replace，保证对下游消费方传播。
+	github.com/go-echarts/go-echarts/v2 v2.3.3
 	github.com/go-ping/ping v1.2.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-redis/redis_rate/v9 v9.1.2

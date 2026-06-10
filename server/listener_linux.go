@@ -11,7 +11,7 @@ import (
 	uringnet "github.com/godzie44/go-uring/net"
 	"github.com/godzie44/go-uring/reactor"
 	"github.com/godzie44/go-uring/uring"
-	"github.com/smallnest/rpcx/log"
+	"github.com/thkhxm/rpcx/log"
 )
 
 func init() {

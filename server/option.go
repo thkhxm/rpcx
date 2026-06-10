@@ -58,10 +58,24 @@ func WithLogicSyncPoolSize(size int) OptionFn {
 	}
 }
 
+// pondPoolAdapter 把 pond v1.9 的 *pond.WorkerPool 适配成 rpcx 的 WorkerPool 接口。
+// pond 自 v1.9.0 起把 Stop() 的签名从 `Stop()` 改成 `Stop() context.Context`，
+// 导致 *pond.WorkerPool 不再直接实现 WorkerPool 接口（编译失败）。
+// 这里包一层、丢弃返回值，使 fork 同时兼容 pond v1.9.x，
+// 不再依赖 go.mod 里只在主模块生效、对下游不传播的 replace 钉旧版方案。
+type pondPoolAdapter struct {
+	*pond.WorkerPool
+}
+
+// Stop 停止池并丢弃 pond v1.9 新增的 context.Context 返回值。
+func (p pondPoolAdapter) Stop() {
+	_ = p.WorkerPool.Stop()
+}
+
 // WithPool sets goroutine pool.
 func WithPool(maxWorkers, maxCapacity int, options ...pond.Option) OptionFn {
 	return func(s *Server) {
-		s.pool = pond.New(maxWorkers, maxCapacity, options...)
+		s.pool = pondPoolAdapter{pond.New(maxWorkers, maxCapacity, options...)}
 	}
 }
 
@@ -76,5 +90,24 @@ func WithCustomPool(pool WorkerPool) OptionFn {
 func WithAsyncWrite() OptionFn {
 	return func(s *Server) {
 		s.AsyncWrite = true
+	}
+}
+
+// WithHTTPGateway 显式开启 HTTP1 API 网关（安全考虑默认关闭）。
+// 开启后，任何能连到服务端口的客户端都可以通过带 X-RPCX-* 头的普通
+// HTTP POST/GET/PUT 调用任意已注册的 RPC 方法；除非同时配置了
+// Server.AuthFunc 做鉴权，否则不要在不可信网络上开启。
+func WithHTTPGateway() OptionFn {
+	return func(s *Server) {
+		s.DisableHTTPGateway = false
+	}
+}
+
+// WithJSONRPC 显式开启 JSON-RPC 2.0 入口（安全考虑默认关闭）。
+// 开启后，带 X-JSONRPC-2.0:true 头的 HTTP 请求可以直接调用任意已注册
+// 的 RPC 方法；与 WithHTTPGateway 同理，公网端口务必配合 AuthFunc 使用。
+func WithJSONRPC() OptionFn {
+	return func(s *Server) {
+		s.DisableJSONRPC = false
 	}
 }

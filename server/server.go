@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/smallnest/rpcx/client"
+	"github.com/thkhxm/rpcx/client"
 	"io"
 	"net"
 	"net/http"
@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/jamiealquiza/tachymeter"
-	"github.com/smallnest/rpcx/log"
-	"github.com/smallnest/rpcx/protocol"
-	"github.com/smallnest/rpcx/share"
+	"github.com/thkhxm/rpcx/log"
+	"github.com/thkhxm/rpcx/protocol"
+	"github.com/thkhxm/rpcx/share"
 	"github.com/soheilhy/cmux"
 	"golang.org/x/net/websocket"
 )
@@ -86,8 +86,13 @@ type Server struct {
 
 	jsonrpcHTTPServerLock sync.Mutex
 	jsonrpcHTTPServer     *http.Server
-	DisableHTTPGateway    bool // disable http invoke or not.
-	DisableJSONRPC        bool // disable json rpc or not.
+	// DisableHTTPGateway 控制 HTTP1 API 网关。出于安全考虑（无鉴权时任何
+	// 能连到服务端口的人都可经 HTTP 调用任意 RPC 方法），默认值为 true（关闭），
+	// 需要时通过 WithHTTPGateway() 显式开启。
+	DisableHTTPGateway bool
+	// DisableJSONRPC 控制 JSON-RPC 2.0 入口，默认值为 true（关闭），
+	// 需要时通过 WithJSONRPC() 显式开启。
+	DisableJSONRPC bool
 	EnableProfile         bool // enable profile and statsview or not
 	AsyncWrite            bool // set true if your server only serves few clients
 	pool                  WorkerPool
@@ -145,6 +150,11 @@ func NewServer(options ...OptionFn) *Server {
 		router:          make(map[string]Handler),
 		logicSyncMethod: make(map[string]bool),
 		AsyncWrite:      false, // 除非你想做进一步的优化测试，否则建议你设置为false
+		// 安全默认值：HTTP1 网关与 JSON-RPC 入口默认关闭（上游默认开启且无鉴权，
+		// 等于在每个服务端口暴露一个未授权的 RPC 调用面）。
+		// 需要时用 WithHTTPGateway() / WithJSONRPC() 显式 opt-in。
+		DisableHTTPGateway: true,
+		DisableJSONRPC:     true,
 	}
 
 	for _, op := range options {

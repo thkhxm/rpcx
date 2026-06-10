@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/smallnest/rpcx/client"
-	"github.com/smallnest/rpcx/protocol"
+	"github.com/thkhxm/rpcx/client"
+	"github.com/thkhxm/rpcx/protocol"
 )
 
 type HeartbeatHandler struct{}
@@ -51,7 +51,9 @@ func TestPluginHeartbeat(t *testing.T) {
 		// PeerDiscovery
 		d, err := client.NewPeer2PeerDiscovery("tcp@127.0.0.1:9001", "")
 		if err != nil {
-			t.Fatalf("failed to NewPeer2PeerDiscovery: %v", err)
+			// goroutine 内不允许调用 t.Fatalf（go vet 告警），改用 Errorf + return
+			t.Errorf("failed to NewPeer2PeerDiscovery: %v", err)
+			return
 		}
 
 		c := client.NewXClient("Arith", client.Failtry, client.RoundRobin, d, opts)

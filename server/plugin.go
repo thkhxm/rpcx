@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/smallnest/rpcx/errors"
-	"github.com/smallnest/rpcx/protocol"
+	"github.com/thkhxm/rpcx/errors"
+	"github.com/thkhxm/rpcx/protocol"
 	"github.com/soheilhy/cmux"
 )
 
