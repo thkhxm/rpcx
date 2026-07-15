@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metrics "github.com/rcrowley/go-metrics"
@@ -32,25 +33,77 @@ type RedisRegisterPlugin struct {
 	Metrics  metrics.Registry
 	// Registered services
 	Services       []string
-	metasLock      sync.RWMutex
+	stateLock      sync.RWMutex
 	metas          map[string]string
 	UpdateInterval time.Duration
+	// StopTimeout bounds how long each Stop call waits for lifecycle contention,
+	// refresh shutdown, and registry cleanup. Zero uses
+	// DefaultRedisRegisterPluginStopTimeout. If the timeout expires before the
+	// lifecycle lock is acquired, no cleanup attempt has started and the caller
+	// must call Stop again. Once an attempt starts, it may finish in the background.
+	StopTimeout time.Duration
 
 	Options *store.Config
 	kv      store.Store
 
-	dying chan struct{}
-	done  chan struct{}
+	lifecycleLock sync.Mutex
+	storeLock     sync.Mutex
+	dying         chan struct{}
+	done          chan struct{}
+	started       bool
+	stopped       bool
+	stopComplete  bool
+	stopAttempt   *redisStopAttempt
+	stopRequested atomic.Bool
+}
+
+type redisStopAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+// DefaultRedisRegisterPluginStopTimeout is the total wait budget for Stop,
+// including contention on lifecycle operations and registry cleanup.
+const DefaultRedisRegisterPluginStopTimeout = 5 * time.Second
+
+var (
+	errRedisBasePathEmpty         = errors.New("redis register plugin BasePath can't be empty")
+	errRedisRegisterPluginStopped = errors.New("redis register plugin has stopped")
+	// ErrRedisRegisterPluginStopTimeout identifies a bounded Stop wait. When the
+	// timeout occurs during lifecycle-lock contention, callers must retry Stop to
+	// start cleanup. If cleanup already started, it remains serialized in the
+	// background and a later Stop observes it or retries a failed attempt.
+	ErrRedisRegisterPluginStopTimeout = errors.New("redis register plugin stop timeout")
+)
+
+func (p *RedisRegisterPlugin) validateBasePath() error {
+	if strings.TrimSpace(p.BasePath) == "" {
+		return errRedisBasePathEmpty
+	}
+	return nil
 }
 
 // Start starts to connect redis cluster
 func (p *RedisRegisterPlugin) Start() error {
-	if p.done == nil {
-		p.done = make(chan struct{})
+	if p.stopRequested.Load() {
+		return errRedisRegisterPluginStopped
 	}
-	if p.dying == nil {
-		p.dying = make(chan struct{})
+
+	p.lifecycleLock.Lock()
+	defer p.lifecycleLock.Unlock()
+
+	if p.stopRequested.Load() || p.stopped {
+		return errRedisRegisterPluginStopped
 	}
+	if p.started {
+		return nil
+	}
+	if err := p.validateBasePath(); err != nil {
+		return err
+	}
+
+	p.done = make(chan struct{})
+	p.dying = make(chan struct{})
 
 	if p.kv == nil {
 		kv, err := libkv.NewStore(store.REDIS, p.RedisServers, p.Options)
@@ -65,22 +118,30 @@ func (p *RedisRegisterPlugin) Start() error {
 	err := p.kv.Put(p.BasePath, []byte("rpcx_path"), &store.WriteOptions{IsDir: true})
 	if err != nil && !strings.Contains(err.Error(), "Not a file") {
 		log.Errorf("cannot create redis path %s: %v", p.BasePath, err)
+		p.kv.Close()
+		p.kv = nil
 		close(p.done)
 		return err
 	}
 
+	p.started = true
 	if p.UpdateInterval > 0 {
+		kv := p.kv
+		dying := p.dying
+		done := p.done
+		basePath := p.BasePath
+		serviceAddress := p.ServiceAddress
+		updateInterval := p.UpdateInterval
 		go func() {
-			ticker := time.NewTicker(p.UpdateInterval)
+			defer close(done)
+			ticker := time.NewTicker(updateInterval)
 
 			defer ticker.Stop()
-			defer p.kv.Close()
 
 			// refresh service TTL
 			for {
 				select {
-				case <-p.dying:
-					close(p.done)
+				case <-dying:
 					return
 				case <-ticker.C:
 					extra := make(map[string]string)
@@ -88,33 +149,43 @@ func (p *RedisRegisterPlugin) Start() error {
 						extra["calls"] = fmt.Sprintf("%.2f", metrics.GetOrRegisterMeter("calls", p.Metrics).RateMean())
 						extra["connections"] = fmt.Sprintf("%.2f", metrics.GetOrRegisterMeter("connections", p.Metrics).RateMean())
 					}
+
+					p.storeLock.Lock()
+					p.stateLock.RLock()
+					services := append([]string(nil), p.Services...)
+					metas := make(map[string]string, len(services))
+					for _, name := range services {
+						metas[name] = p.metas[name]
+					}
+					p.stateLock.RUnlock()
+
 					// set this same metrics for all services at this server
-					for _, name := range p.Services {
-						nodePath := fmt.Sprintf("%s/%s/%s", p.BasePath, name, p.ServiceAddress)
-						kvPair, err := p.kv.Get(nodePath)
+					for _, name := range services {
+						nodePath := fmt.Sprintf("%s/%s/%s", basePath, name, serviceAddress)
+						kvPair, err := kv.Get(nodePath)
 						if err != nil {
 							log.Infof("can't get data of node: %s, because of %v", nodePath, err.Error())
 
-							p.metasLock.RLock()
-							meta := p.metas[name]
-							p.metasLock.RUnlock()
-
-							err = p.kv.Put(nodePath, []byte(meta), &store.WriteOptions{TTL: p.UpdateInterval * 2})
+							err = kv.Put(nodePath, []byte(metas[name]), &store.WriteOptions{TTL: updateInterval * 2})
 							if err != nil {
 								log.Errorf("cannot re-create redis path %s: %v", nodePath, err)
 							}
-
 						} else {
 							v, _ := url.ParseQuery(string(kvPair.Value))
 							for key, value := range extra {
 								v.Set(key, value)
 							}
-							p.kv.Put(nodePath, []byte(v.Encode()), &store.WriteOptions{TTL: p.UpdateInterval * 2})
+							if err := kv.Put(nodePath, []byte(v.Encode()), &store.WriteOptions{TTL: updateInterval * 2}); err != nil {
+								log.Errorf("cannot refresh redis path %s: %v", nodePath, err)
+							}
 						}
 					}
+					p.storeLock.Unlock()
 				}
 			}
 		}()
+	} else {
+		close(p.done)
 	}
 
 	return nil
@@ -122,31 +193,133 @@ func (p *RedisRegisterPlugin) Start() error {
 
 // Stop unregister all services.
 func (p *RedisRegisterPlugin) Stop() error {
-	if p.kv == nil {
-		kv, err := libkv.NewStore(store.REDIS, p.RedisServers, p.Options)
-		if err != nil {
-			log.Errorf("cannot create redis registry: %v", err)
-			return err
-		}
-		p.kv = kv
+	p.stopRequested.Store(true)
+	timeout := p.StopTimeout
+	if timeout <= 0 {
+		timeout = DefaultRedisRegisterPluginStopTimeout
+	}
+	deadline := time.Now().Add(timeout)
+
+	if !p.lockLifecycleUntil(deadline) {
+		return fmt.Errorf("%w after %s", ErrRedisRegisterPluginStopTimeout, timeout)
+	}
+	if p.stopComplete {
+		p.lifecycleLock.Unlock()
+		return nil
 	}
 
-	for _, name := range p.Services {
-		nodePath := fmt.Sprintf("%s/%s/%s", p.BasePath, name, p.ServiceAddress)
-		exist, err := p.kv.Exists(nodePath)
-		if err != nil {
-			log.Errorf("cannot delete path %s: %v", nodePath, err)
-			continue
-		}
-		if exist {
-			p.kv.Delete(nodePath)
-			log.Infof("delete path %s", nodePath)
+	if !p.stopped {
+		p.stopped = true
+		p.started = false
+		if p.dying != nil {
+			close(p.dying)
 		}
 	}
 
-	close(p.dying)
-	<-p.done
+	attempt := p.stopAttempt
+	if attempt == nil {
+		attempt = &redisStopAttempt{done: make(chan struct{})}
+		p.stopAttempt = attempt
+		go p.runStopAttempt(attempt, p.done)
+	}
+	p.lifecycleLock.Unlock()
 
+	select {
+	case <-attempt.done:
+		return attempt.err
+	default:
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("%w after %s", ErrRedisRegisterPluginStopTimeout, timeout)
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-attempt.done:
+		return attempt.err
+	case <-timer.C:
+		// Prefer a just-completed result over a boundary timeout.
+		select {
+		case <-attempt.done:
+			return attempt.err
+		default:
+		}
+		return fmt.Errorf("%w after %s", ErrRedisRegisterPluginStopTimeout, timeout)
+	}
+}
+
+func (p *RedisRegisterPlugin) lockLifecycleUntil(deadline time.Time) bool {
+	for {
+		if p.lifecycleLock.TryLock() {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		pause := time.Millisecond
+		if remaining < pause {
+			pause = remaining
+		}
+		timer := time.NewTimer(pause)
+		<-timer.C
+	}
+}
+
+func (p *RedisRegisterPlugin) runStopAttempt(attempt *redisStopAttempt, refreshDone <-chan struct{}) {
+	if refreshDone != nil {
+		<-refreshDone
+	}
+	attempt.err = p.cleanupRegistry()
+
+	p.lifecycleLock.Lock()
+	if attempt.err == nil {
+		p.stopComplete = true
+	}
+	if p.stopAttempt == attempt {
+		p.stopAttempt = nil
+	}
+	close(attempt.done)
+	p.lifecycleLock.Unlock()
+}
+
+func (p *RedisRegisterPlugin) cleanupRegistry() error {
+	p.storeLock.Lock()
+	defer p.storeLock.Unlock()
+
+	p.stateLock.RLock()
+	services := append([]string(nil), p.Services...)
+	p.stateLock.RUnlock()
+
+	var errs []error
+	if p.kv != nil {
+		for _, name := range services {
+			nodePath := fmt.Sprintf("%s/%s/%s", p.BasePath, name, p.ServiceAddress)
+			exist, err := p.kv.Exists(nodePath)
+			if err != nil {
+				log.Errorf("cannot delete path %s: %v", nodePath, err)
+				errs = append(errs, fmt.Errorf("check redis path %s: %w", nodePath, err))
+				continue
+			}
+			if exist {
+				if err := p.kv.Delete(nodePath); err != nil {
+					log.Errorf("cannot delete path %s: %v", nodePath, err)
+					errs = append(errs, fmt.Errorf("delete redis path %s: %w", nodePath, err))
+					continue
+				}
+				log.Infof("delete path %s", nodePath)
+			}
+		}
+
+		stopErr := errors.Join(errs...)
+		if stopErr != nil {
+			return stopErr
+		}
+
+		p.kv.Close()
+		p.kv = nil
+	}
 	return nil
 }
 
@@ -173,6 +346,18 @@ func (p *RedisRegisterPlugin) Register(name string, rcvr interface{}, metadata s
 		err = errors.New("Register service `name` can't be empty")
 		return
 	}
+	if p.stopRequested.Load() {
+		return errRedisRegisterPluginStopped
+	}
+
+	p.lifecycleLock.Lock()
+	defer p.lifecycleLock.Unlock()
+	if p.stopRequested.Load() || p.stopped {
+		return errRedisRegisterPluginStopped
+	}
+	if err := p.validateBasePath(); err != nil {
+		return err
+	}
 
 	if p.kv == nil {
 		redis.Register()
@@ -183,6 +368,9 @@ func (p *RedisRegisterPlugin) Register(name string, rcvr interface{}, metadata s
 		}
 		p.kv = kv
 	}
+
+	p.storeLock.Lock()
+	defer p.storeLock.Unlock()
 
 	err = p.kv.Put(p.BasePath, []byte("rpcx_path"), &store.WriteOptions{IsDir: true})
 	if err != nil && !strings.Contains(err.Error(), "Not a file") {
@@ -204,19 +392,32 @@ func (p *RedisRegisterPlugin) Register(name string, rcvr interface{}, metadata s
 		return err
 	}
 
+	p.stateLock.Lock()
 	p.Services = append(p.Services, name)
-
-	p.metasLock.Lock()
 	if p.metas == nil {
 		p.metas = make(map[string]string)
 	}
 	p.metas[name] = metadata
-	p.metasLock.Unlock()
+	p.stateLock.Unlock()
 	return
 }
 
 func (p *RedisRegisterPlugin) Unregister(name string) (err error) {
-	if len(p.Services) == 0 {
+	if p.stopRequested.Load() {
+		return nil
+	}
+
+	p.lifecycleLock.Lock()
+	defer p.lifecycleLock.Unlock()
+
+	if p.stopRequested.Load() || p.stopped {
+		return nil
+	}
+
+	p.stateLock.RLock()
+	serviceCount := len(p.Services)
+	p.stateLock.RUnlock()
+	if serviceCount == 0 {
 		return nil
 	}
 
@@ -224,7 +425,6 @@ func (p *RedisRegisterPlugin) Unregister(name string) (err error) {
 		err = errors.New("Register service `name` can't be empty")
 		return
 	}
-
 	if p.kv == nil {
 		redis.Register()
 		kv, err := libkv.NewStore(store.REDIS, p.RedisServers, p.Options)
@@ -234,6 +434,9 @@ func (p *RedisRegisterPlugin) Unregister(name string) (err error) {
 		}
 		p.kv = kv
 	}
+
+	p.storeLock.Lock()
+	defer p.storeLock.Unlock()
 
 	err = p.kv.Put(p.BasePath, []byte("rpcx_path"), &store.WriteOptions{IsDir: true})
 	if err != nil && !strings.Contains(err.Error(), "Not a file") {
@@ -256,19 +459,18 @@ func (p *RedisRegisterPlugin) Unregister(name string) (err error) {
 		return err
 	}
 
-	var services = make([]string, 0, len(p.Services)-1)
+	p.stateLock.Lock()
+	services := make([]string, 0, len(p.Services)-1)
 	for _, s := range p.Services {
 		if s != name {
 			services = append(services, s)
 		}
 	}
 	p.Services = services
-
-	p.metasLock.Lock()
 	if p.metas == nil {
 		p.metas = make(map[string]string)
 	}
 	delete(p.metas, name)
-	p.metasLock.Unlock()
+	p.stateLock.Unlock()
 	return
 }
