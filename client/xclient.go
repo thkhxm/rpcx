@@ -72,10 +72,10 @@ type XClient interface {
 
 // SetSelector sets customized selector by users.
 func (c *xClient) SetSelector(s Selector) {
-	c.mu.RLock()
-	s.UpdateServer(c.servers)
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	s.UpdateServer(c.servers)
 	c.selector = s
 }
 
@@ -203,6 +203,9 @@ func (c *xClient) GetPlugins() PluginContainer {
 // ConfigGeoSelector sets location of client's latitude and longitude,
 // and use newGeoSelector.
 func (c *xClient) ConfigGeoSelector(latitude, longitude float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.selector = newGeoSelector(c.servers, latitude, longitude)
 	c.selectMode = Closest
 }

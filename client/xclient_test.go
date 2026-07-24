@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,55 @@ import (
 	"github.com/thkhxm/rpcx/v2/server"
 	"github.com/thkhxm/rpcx/v2/share"
 )
+
+type selectorUpdateDiscovery struct {
+	initial []*KVPair
+	updates chan []*KVPair
+}
+
+func (d *selectorUpdateDiscovery) GetServices() []*KVPair { return d.initial }
+func (d *selectorUpdateDiscovery) WatchService() chan []*KVPair {
+	return d.updates
+}
+func (d *selectorUpdateDiscovery) RemoveWatcher(chan []*KVPair) {}
+func (d *selectorUpdateDiscovery) Clone(string) (ServiceDiscovery, error) {
+	return d, nil
+}
+func (d *selectorUpdateDiscovery) SetFilter(ServiceDiscoveryFilter) {}
+func (d *selectorUpdateDiscovery) Close()                           {}
+
+func TestXClientSelectorUpdatesAreSynchronized(t *testing.T) {
+	discovery := &selectorUpdateDiscovery{
+		initial: []*KVPair{{Key: "tcp@127.0.0.1:10001"}},
+		updates: make(chan []*KVPair),
+	}
+	xclient := NewXClient("Arith", Failfast, SelectByUser, discovery, DefaultOption)
+
+	const iterations = 500
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			discovery.updates <- []*KVPair{{Key: fmt.Sprintf("tcp@127.0.0.1:%d", 10001+i)}}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				xclient.SetSelector(newRandomSelector(nil))
+				continue
+			}
+			xclient.ConfigGeoSelector(0, 0)
+		}
+	}()
+	wg.Wait()
+
+	if err := xclient.Close(); err != nil {
+		t.Fatalf("close xclient: %v", err)
+	}
+}
 
 func TestXClient_Thrift(t *testing.T) {
 	s := server.NewServer()
